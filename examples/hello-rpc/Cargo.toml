@@ -1,0 +1,16 @@
+[package]
+name = "hello-rpc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wit-bindgen-guest-rust = { git = "https://github.com/bytecodealliance/wit-bindgen", default_features = false }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+direct-export = "hello_rpc"
+
+[package.metadata.component.exports]
+hello_rpc = "hello_rpc.wit"
