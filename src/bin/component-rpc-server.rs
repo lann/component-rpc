@@ -1,18 +1,14 @@
-use std::{
-    any::{type_name, Any},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use anyhow::Context;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use component_rpc::{json_to_val, type_default, val_to_json};
+use serde::Deserialize;
+use serde_json::{json, Value as JsonValue};
 use wasmtime::{
     component::{Component, InstancePre, Linker, Val},
     Config, Engine, Store,
 };
-use wit_component::DocumentPrinter;
-use wit_parser::{Document, InterfaceId};
 
 const USAGE: &str = "component-rpc-server <path-to-component>";
 
@@ -22,31 +18,15 @@ async fn main() -> anyhow::Result<()> {
     let _ = args.next().unwrap();
     let path = args.next().context(USAGE)?;
 
-    let wasm = std::fs::read(&path).with_context(|| format!("Failed to read {path:?}"))?;
-
-    let (doc, world_id) = wit_component::decode_world("hello-rpc", &wasm)
-        .with_context(|| format!("Failed to decode World from {path:?}"))?;
-
-    let doc_str = DocumentPrinter::default().print(&doc)?;
-    println!("Parsed world:\n{doc_str}");
-
-    let world = doc
-        .worlds
-        .get(world_id)
-        .expect("Document missing root World");
-
-    let iface_id = world.default.context("World has no default export")?;
-
     let engine = Engine::new(Config::new().wasm_component_model(true))?;
-    let component = Component::new(&engine, &wasm)?;
+    let component = Component::from_file(&engine, &path)
+        .with_context(|| format!("Error loading component from {path:?}"))?;
     let linker = Linker::new(&engine);
     let instance_pre = linker.instantiate_pre(&component)?;
 
     let state = AppState {
         engine,
         instance_pre,
-        doc,
-        iface_id,
     };
 
     let app = Router::new()
@@ -67,8 +47,6 @@ async fn main() -> anyhow::Result<()> {
 struct AppState {
     engine: Engine,
     instance_pre: InstancePre<()>,
-    doc: Document,
-    iface_id: InterfaceId,
 }
 
 #[derive(Deserialize)]
@@ -77,115 +55,62 @@ struct CallRequest {
     pub args: Vec<JsonValue>,
 }
 
-#[derive(Serialize)]
-struct CallResponse {
-    result: JsonValue,
-}
-
 async fn call(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CallRequest>,
-) -> Result<Json<CallResponse>, AppError> {
-    let interface = state.doc.interfaces.get(state.iface_id).unwrap();
-
+) -> Result<Json<JsonValue>, AppError> {
     let func_name = req.name;
 
-    let func_type = interface
-        .functions
-        .iter()
-        .find(|f| f.name == func_name)
-        .with_context(|| format!("Component has no default export function named {func_name:?}"))?;
+    let mut store = Store::new(&state.engine, ());
+    let instance = state.instance_pre.instantiate(&mut store)?;
 
-    use wit_parser::Type::*;
+    let func = instance
+        .exports(&mut store)
+        .root()
+        .func(&func_name)
+        .with_context(|| format!("No such export {func_name:?}"))?;
 
     let mut args = req.args.into_iter();
 
     let mut arg_vals: Vec<Val> = vec![];
-    for (name, ty) in &func_type.params {
+    for (idx, param_type) in func.params(&store).iter().enumerate() {
         let arg_json = args
             .next()
-            .with_context(|| format!("Missing argument for parameter {name:?}"))?;
+            .with_context(|| format!("Missing argument for parameter {idx}"))?;
 
-        arg_vals.push(match ty {
-            Bool => todo!(),
-            U8 => todo!(),
-            U16 => todo!(),
-            U32 => Val::U32(deserialize_arg(arg_json)?),
-            U64 => todo!(),
-            S8 => todo!(),
-            S16 => todo!(),
-            S32 => todo!(),
-            S64 => todo!(),
-            Float32 => todo!(),
-            Float64 => todo!(),
-            Char => todo!(),
-            String => todo!(),
-            Id(_) => todo!(),
-        });
+        arg_vals.push(json_to_val(param_type, arg_json)?);
     }
 
-    let mut result_vals: Vec<Val> = vec![];
-    match func_type.results {
-        wit_parser::Results::Named(_) => todo!(),
-        wit_parser::Results::Anon(ty) => result_vals.push(match ty {
-            Bool => todo!(),
-            U8 => todo!(),
-            U16 => todo!(),
-            U32 => Val::U32(0),
-            U64 => todo!(),
-            S8 => todo!(),
-            S16 => todo!(),
-            S32 => todo!(),
-            S64 => todo!(),
-            Float32 => todo!(),
-            Float64 => todo!(),
-            Char => todo!(),
-            String => todo!(),
-            Id(_) => todo!(),
-        }),
-    }
+    let mut result_vals = func
+        .results(&store)
+        .into_vec()
+        .into_iter()
+        .map(type_default)
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut store = Store::new(&state.engine, ());
-    let instance = state.instance_pre.instantiate(&mut store)?;
     let func = instance
         .get_func(&mut store, &func_name)
         .context("Instance missing function")?;
 
     func.call(&mut store, &arg_vals, &mut result_vals)?;
 
-    let result = match result_vals[0] {
-        Val::Bool(_) => todo!(),
-        Val::S8(_) => todo!(),
-        Val::U8(_) => todo!(),
-        Val::S16(_) => todo!(),
-        Val::U16(_) => todo!(),
-        Val::S32(_) => todo!(),
-        Val::U32(v) => v.into(),
-        Val::S64(_) => todo!(),
-        Val::U64(_) => todo!(),
-        Val::Float32(_) => todo!(),
-        Val::Float64(_) => todo!(),
-        Val::Char(_) => todo!(),
-        Val::String(_) => todo!(),
-        Val::List(_) => todo!(),
-        Val::Record(_) => todo!(),
-        Val::Tuple(_) => todo!(),
-        Val::Variant(_) => todo!(),
-        Val::Enum(_) => todo!(),
-        Val::Union(_) => todo!(),
-        Val::Option(_) => todo!(),
-        Val::Result(_) => todo!(),
-        Val::Flags(_) => todo!(),
-    };
-
-    Ok(Json(CallResponse { result }))
+    Ok(Json(results_to_json(&result_vals)))
 }
 
-fn deserialize_arg<T: Any + DeserializeOwned>(arg: JsonValue) -> anyhow::Result<T> {
-    serde_json::from_value(arg).with_context(|| {
-        let type_name = type_name::<T>();
-        format!("Failed to parse arg as a {type_name:?}")
-    })
+fn results_to_json(result_vals: &[Val]) -> JsonValue {
+    if result_vals.is_empty() {
+        json!({})
+    } else if result_vals.len() == 1 {
+        let val = &result_vals[0];
+        let json = val_to_json(val);
+        if let Val::Result(_) = val {
+            return json;
+        }
+        json!({ "result": json })
+    } else {
+        let results: Vec<_> = result_vals.iter().map(val_to_json).collect();
+        json!({ "results": results })
+    }
 }
 
 struct AppError(anyhow::Error);

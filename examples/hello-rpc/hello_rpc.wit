@@ -1,3 +1,4 @@
 interface hello-rpc {
     add: func(left: u32, right: u32) -> u32
+    decode-hex: func(hex: string) -> result<u64, string>
 }
