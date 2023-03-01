@@ -1,14 +1,22 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
-use component_rpc::{json_to_val, type_default, val_to_json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use wasmtime::{
     component::{Component, InstancePre, Linker, Val},
     Config, Engine, Store,
 };
+use wit_parser::Document;
+
+use component_rpc::{json_to_val, openapi::build_openapi_doc, val_to_json, TypeExt};
 
 const USAGE: &str = "component-rpc-server <path-to-component>";
 
@@ -18,19 +26,25 @@ async fn main() -> anyhow::Result<()> {
     let _ = args.next().unwrap();
     let path = args.next().context(USAGE)?;
 
+    let wasm = std::fs::read(&path).with_context(|| format!("Error reading {path:?}"))?;
+
+    let (doc, _) = wit_component::decode_world("", &wasm)?;
+
     let engine = Engine::new(Config::new().wasm_component_model(true))?;
-    let component = Component::from_file(&engine, &path)
+    let component = Component::new(&engine, &wasm)
         .with_context(|| format!("Error loading component from {path:?}"))?;
     let linker = Linker::new(&engine);
     let instance_pre = linker.instantiate_pre(&component)?;
 
     let state = AppState {
+        doc,
         engine,
         instance_pre,
     };
 
     let app = Router::new()
         .route("/call", post(call))
+        .route("/openapi.json", get(openapi))
         .with_state(Arc::new(state));
 
     let addr = "0.0.0.0:3456".parse().unwrap();
@@ -45,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 struct AppState {
+    doc: Document,
     engine: Engine,
     instance_pre: InstancePre<()>,
 }
@@ -85,7 +100,7 @@ async fn call(
         .results(&store)
         .into_vec()
         .into_iter()
-        .map(type_default)
+        .map(|ty| ty.default_val())
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let func = instance
@@ -95,6 +110,11 @@ async fn call(
     func.call(&mut store, &arg_vals, &mut result_vals)?;
 
     Ok(Json(results_to_json(&result_vals)))
+}
+
+async fn openapi(State(state): State<Arc<AppState>>) -> Result<Json<JsonValue>, AppError> {
+    let openapi = build_openapi_doc(&state.doc)?;
+    Ok(Json(openapi))
 }
 
 fn results_to_json(result_vals: &[Val]) -> JsonValue {

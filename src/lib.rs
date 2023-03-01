@@ -1,56 +1,12 @@
+pub mod openapi;
+pub mod serde;
+mod type_ext;
+
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value as JsonValue;
 use wasmtime::component::{Type, Val};
 
-pub fn type_default(ty: Type) -> Result<Val> {
-    Ok(match ty {
-        Type::Bool => Val::Bool(false),
-        Type::U8 => Val::U8(0),
-        Type::U16 => Val::U16(0),
-        Type::U32 => Val::U32(0),
-        Type::U64 => Val::U64(0),
-        Type::S8 => Val::S8(0),
-        Type::S16 => Val::S16(0),
-        Type::S32 => Val::S32(0),
-        Type::S64 => Val::S64(0),
-        Type::Float32 => Val::Float32(0),
-        Type::Float64 => Val::Float64(0),
-        Type::Char => Val::Char('\x00'),
-        Type::String => Val::String("".into()),
-
-        Type::List(list) => list.new_val(Default::default())?,
-        Type::Record(record) => {
-            let values = record
-                .fields()
-                .map(|field| Ok((field.name, type_default(field.ty)?)))
-                .collect::<Result<Vec<_>>>()?;
-            record.new_val(values)?
-        }
-        Type::Tuple(tuple) => {
-            let values = tuple.types().map(type_default).collect::<Result<_>>()?;
-            tuple.new_val(values)?
-        }
-        Type::Variant(variant) => {
-            let case = variant.cases().next().expect("variant should have a case");
-            let value = case.ty.map(type_default).transpose()?;
-            variant.new_val(case.name, value)?
-        }
-        Type::Enum(enum_) => {
-            let name = enum_.names().next().expect("enum should have a case");
-            enum_.new_val(name)?
-        }
-        Type::Union(union) => {
-            let ty = union.types().next().expect("union should have a case");
-            union.new_val(0, type_default(ty)?)?
-        }
-        Type::Option(option) => option.new_val(None)?,
-        Type::Result(result) => {
-            let value = result.ok().map(type_default).transpose()?;
-            result.new_val(Ok(value))?
-        }
-        Type::Flags(flags) => flags.new_val(&[])?,
-    })
-}
+pub use type_ext::TypeExt;
 
 pub fn json_to_val(ty: &Type, json: JsonValue) -> Result<Val> {
     use serde_json::from_value;
